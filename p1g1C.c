@@ -3,7 +3,7 @@
 // Run: ./client <server-ip> [port]
 // Example: ./client 127.0.0.1 12345
 
-#define _POSIX_C_SOURCE 200112L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
