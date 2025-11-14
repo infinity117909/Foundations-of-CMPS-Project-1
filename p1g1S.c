@@ -1,4 +1,3 @@
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +14,8 @@
 #define MAX_MESSAGE 1024
 #define MAX_CLIENTS 128
 
+#define SERVER_PASSWORD "PleaseGiveMeExtraCredit:)"
+
 typedef struct client {
     int sockfd;
     char username[MAX_USERNAME];
@@ -27,6 +28,7 @@ typedef struct message {
     char text[MAX_MESSAGE];
     struct message *next;
 } message_t;
+
 
 // Global client list (linked list)
 static client_t *clients_head = NULL;
@@ -109,6 +111,20 @@ message_t *dequeue_message() {
     return m;
 }
 
+// Read a single line ending with '\n'. Returns length or -1 on error.
+int recv_line(int fd, char *buf, size_t maxlen) {
+    size_t idx = 0;
+    while (idx < maxlen - 1) {
+        char c;
+        ssize_t n = recv(fd, &c, 1, 0);
+        if (n <= 0) return -1;
+        buf[idx++] = c;
+        if (c == '\n') break;
+    }
+    buf[idx] = '\0';
+    return idx;
+}
+
 // Client list operations
 void add_client(client_t *c) {
     pthread_mutex_lock(&clients_mutex);
@@ -130,6 +146,8 @@ void remove_client(client_t *c) {
     pthread_mutex_unlock(&clients_mutex);
 }
 
+//***************************************//
+
 // Check if username already taken
 int username_taken(const char *username) {
     int taken = 0;
@@ -145,6 +163,7 @@ int username_taken(const char *username) {
     pthread_mutex_unlock(&clients_mutex);
     return taken;
 }
+
 
 void close_and_free_client(client_t *c) {
     if (!c) return;
@@ -171,6 +190,36 @@ void *client_thread(void *arg) {
     client_t *c = (client_t *)arg;
     char buf[MAX_MESSAGE + 64];
     ssize_t n;
+
+    // -------- PASSWORD PHASE ----------
+    // Tell client to send password
+    send_all(c->sockfd, "PASSWORD:\n", 10);
+
+    if (recv_line(c->sockfd, buf, sizeof(buf)) <= 0) {
+        close_and_free_client(c);
+        return NULL;
+    }
+
+    // Remove newline
+    char *nl = strchr(buf, '\n');
+    if (nl) *nl = '\0';
+
+    if (strncmp(buf, "PASS:", 5) != 0) {
+        send_all(c->sockfd, "ERR:Expected PASS:<password>\n", 30);
+        close_and_free_client(c);
+        return NULL;
+    }
+
+    const char *pw = buf + 5;
+
+    if (strcmp(pw, SERVER_PASSWORD) != 0) {
+        send_all(c->sockfd, "ERR:Bad password\n", 17);
+        close_and_free_client(c);
+        return NULL;
+    }
+
+    // Password accepted
+    send_all(c->sockfd, "OKPASS\n", 7);
 
     // Expect LOGIN:<username>\n
     n = recv(c->sockfd, buf, sizeof(buf)-1, 0);
@@ -205,7 +254,7 @@ void *client_thread(void *arg) {
         close_and_free_client(c);
         return NULL;
     }
-
+    
     // Accept
     strncpy(c->username, uname, MAX_USERNAME-1);
     c->logged_in = 1;
