@@ -91,6 +91,50 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // Wait for PASSWORD:
+    char resp[256];
+    ssize_t n = recv(server_fd, resp, sizeof(resp)-1, 0);
+    if (n <= 0) {
+        perror("recv");
+        close(server_fd);
+        return 1;
+    }
+    resp[n] = '\0';
+
+    if (strncmp(resp, "PASSWORD:", 9) != 0) {
+        printf("Unexpected server response: %s\n", resp);
+        close(server_fd);
+        return 1;
+    }
+
+    char pw[128];
+    printf("Enter server password: ");
+    if (!fgets(pw, sizeof(pw), stdin)) {
+        close(server_fd);
+        return 1;
+    }
+    char *nlp = strchr(pw, '\n');
+    if (nlp) *nlp = '\0';
+
+    char sendpw[256];
+    snprintf(sendpw, sizeof(sendpw), "PASS:%s\n", pw);
+    send_all(server_fd, sendpw, strlen(sendpw));
+
+    n = recv(server_fd, resp, sizeof(resp)-1, 0);
+    if (n <= 0) {
+        perror("recv");
+        close(server_fd);
+        return 1;
+    }
+    resp[n] = '\0';
+
+    if (strncmp(resp, "OKPASS", 6) != 0) {
+        printf("Server rejected password: %s\n", resp);
+        close(server_fd);
+        return 1;
+    }
+
+
     // Prompt for username
     char username[MAX_USERNAME];
     printf("Enter username: ");
@@ -98,6 +142,7 @@ int main(int argc, char **argv) {
         close(server_fd);
         return 1;
     }
+
     // trim newline
     char *nl = strchr(username, '\n');
     if (nl) *nl = '\0';
@@ -117,7 +162,7 @@ int main(int argc, char **argv) {
     }
 
     // Wait for server response (OK or ERR:)
-    char resp[256];
+    //char resp[256];
     ssize_t nr = recv(server_fd, resp, sizeof(resp)-1, 0);
     if (nr <= 0) {
         perror("recv");
