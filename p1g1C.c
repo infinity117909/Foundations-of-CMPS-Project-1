@@ -3,17 +3,17 @@
 // Run: ./client <server-ip> [port]
 // Example: ./client 127.0.0.1 12345
 
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <errno.h>
-#include <signal.h>
-#include <pthread.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
+// Include header files
+#include <stdio.h> // for printf, fprintf, fgets, etc.
+#include <stdlib.h> // for exit, atoi, etc.
+#include <string.h> // for memset, strlen, strcmp, etc.
+#include <unistd.h> // for close, read, write, etc.
+#include <errno.h> // for errno
+#include <signal.h> // for signal handling
+#include <pthread.h> // for pthreads
+#include <netinet/in.h> // for sockaddr_in
+#include <sys/socket.h> // for socket functions
+#include <arpa/inet.h> // for inet_pton
 
 #define DEFAULT_PORT 12345
 #define MAX_USERNAME 32
@@ -22,6 +22,17 @@
 static int server_fd = -1;
 static volatile int running = 1;
 
+/**
+ * @brief Sends all bytes in the buffer to the specified file descriptor.
+ * 
+ * @details This function attempts to send the entire buffer of length 'len' to fd.
+ * 
+ * @param fd The file descriptor to send data to.
+ * @param buf Pointer to the buffer containing data to send.
+ * @param len The length of the buffer in bytes.
+ * 
+ * @return ssize_t The total number of bytes sent, or -1 on error.
+ */
 ssize_t send_all(int fd, const void *buf, size_t len) {
     size_t total = 0;
     const char *p = buf;
@@ -36,6 +47,13 @@ ssize_t send_all(int fd, const void *buf, size_t len) {
     return total;
 }
 
+/**
+ * @brief Thread function to receive messages from the server.
+ * 
+ * @param arg Unused parameter.
+ * 
+ * @return void* Always returns NULL.
+ */
 void *recv_thread(void *arg) {
     (void)arg;
     char buf[2048];
@@ -57,6 +75,20 @@ void *recv_thread(void *arg) {
     }
     return NULL;
 }
+
+// Helper: receive one line from server
+    int recv_line_client(int fd, char *buf, size_t maxlen) {
+        size_t idx = 0;
+        while (idx < maxlen-1) {
+            char c;
+            ssize_t n = recv(fd, &c, 1, 0);
+            if (n <= 0) return -1; // server closed or error
+            buf[idx++] = c;
+            if (c == '\n') break;
+        }
+        buf[idx] = '\0';
+        return idx;
+    }
 
 int main(int argc, char **argv) {
     if (argc < 2) {
@@ -91,6 +123,122 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // ---------------- PASSWORD PHASE (LINE-BY-LINE, MAX 5 ATTEMPTS) ---------------- //
+
+    // Declare response buffer here
+    char resp[256];
+    int attempts = 0;
+
+    while (attempts < 5) {
+        // Wait for server prompt or message
+        if (recv_line_client(server_fd, resp, sizeof(resp)) <= 0) {
+            printf("Server closed connection.\n");
+            close(server_fd);
+            return 1;
+        }
+
+        // Print any error messages
+        if (strncmp(resp, "PASSWORD:", 9) != 0) {
+            printf("%s", resp);  // e.g., ERR:Bad password
+            continue;            // wait for actual password prompt
+        }
+
+        // Prompt user
+        char pw[128];
+        printf("Enter server password: ");
+        fflush(stdout);
+        if (!fgets(pw, sizeof(pw), stdin)) {
+            close(server_fd);
+            return 1;
+        }
+        pw[strcspn(pw, "\n")] = '\0'; // remove newline
+
+        // Send password to server
+        char sendpw[256];
+        snprintf(sendpw, sizeof(sendpw), "PASS:%s\n", pw);
+        if (send_all(server_fd, sendpw, strlen(sendpw)) < 0) {
+            perror("send");
+            close(server_fd);
+            return 1;
+        }
+
+        // Receive server response line
+        if (recv_line_client(server_fd, resp, sizeof(resp)) <= 0) {
+            printf("Server closed connection.\n");
+            close(server_fd);
+            return 1;
+        }
+
+        // Check response
+        if (strncmp(resp, "OKPASS", 6) == 0) {
+            printf("Password accepted.\n");
+            break;
+        }
+
+        // Wrong password
+        printf("%s", resp);
+        attempts++;
+    }
+
+    // If max attempts reached
+    if (attempts >= 5) {
+        printf("Too many failed attempts. Disconnecting.\n");
+        close(server_fd);
+        return 1;
+    }
+
+
+
+
+/*
+    // -------------- PASSWORD PHASE (RFC-CLEAN) -------------- //
+    // Wait for PASSWORD:
+    char resp[256];
+    ssize_t n = recv(server_fd, resp, sizeof(resp)-1, 0);
+    if (n <= 0) {
+        perror("recv");
+        close(server_fd);
+        return 1;
+    }
+    resp[n] = '\0';
+
+    // Check for "PASSWORD:"
+    if (strncmp(resp, "PASSWORD:", 9) != 0) {
+        printf("Unexpected server response: %s\n", resp);
+        close(server_fd);
+        return 1;
+    }
+
+    char pw[128]; // buffer for password
+
+    printf("Enter server password: ");
+    if (!fgets(pw, sizeof(pw), stdin)) {
+        close(server_fd);
+        return 1;
+    }
+    char *nlp = strchr(pw, '\n'); // Trim newline for fair comparison
+    if (nlp) *nlp = '\0'; // Remove newline
+
+    char sendpw[256]; // buffer for sending password
+    snprintf(sendpw, sizeof(sendpw), "PASS:%s\n", pw); // Prepare PASS message
+    send_all(server_fd, sendpw, strlen(sendpw)); // Send PASS:<password>\n
+
+    n = recv(server_fd, resp, sizeof(resp)-1, 0); // Wait for server response
+    if (n <= 0) {
+        perror("recv");
+        close(server_fd);
+        return 1;
+    }
+    resp[n] = '\0';
+
+    if (strncmp(resp, "OKPASS", 6) != 0) {
+        printf("Server rejected password: %s\n", resp);
+        
+        close(server_fd);
+        return 1;
+    }
+*/
+
     // Prompt for username
     char username[MAX_USERNAME];
     printf("Enter username: ");
@@ -98,6 +246,7 @@ int main(int argc, char **argv) {
         close(server_fd);
         return 1;
     }
+
     // trim newline
     char *nl = strchr(username, '\n');
     if (nl) *nl = '\0';
@@ -117,7 +266,7 @@ int main(int argc, char **argv) {
     }
 
     // Wait for server response (OK or ERR:)
-    char resp[256];
+    //char resp[256];
     ssize_t nr = recv(server_fd, resp, sizeof(resp)-1, 0);
     if (nr <= 0) {
         perror("recv");
